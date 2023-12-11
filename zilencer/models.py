@@ -1,18 +1,21 @@
 # https://github.com/typeddjango/django-stubs/issues/1698
 # mypy: disable-error-code="explicit-override"
 
+from dataclasses import dataclass
+from datetime import datetime, timedelta
 from typing import List, Tuple
 
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import models
-from django.db.models import Q, UniqueConstraint
+from django.db.models import Max, Q, UniqueConstraint
+from django.utils.timezone import now as timezone_now
 from typing_extensions import override
 
 from analytics.models import BaseCount
 from zerver.lib.rate_limiter import RateLimitedObject
 from zerver.lib.rate_limiter import rules as rate_limiter_rules
-from zerver.models import AbstractPushDeviceToken, AbstractRealmAuditLog
+from zerver.models import AbstractPushDeviceToken, AbstractRealmAuditLog, Realm, UserProfile
 
 
 def get_remote_server_by_uuid(uuid: str) -> "RemoteZulipServer":
@@ -45,6 +48,7 @@ class RemoteZulipServer(models.Model):
     contact_email = models.EmailField(blank=True, null=False)
     last_updated = models.DateTimeField("last updated", auto_now=True)
     last_version = models.CharField(max_length=VERSION_MAX_LENGTH, null=True)
+    last_api_feature_level = models.PositiveIntegerField(null=True)
 
     # Whether the server registration has been deactivated.
     deactivated = models.BooleanField(default=False)
@@ -57,6 +61,15 @@ class RemoteZulipServer(models.Model):
 
     # The current billing plan for the remote server, similar to Realm.plan_type.
     plan_type = models.PositiveSmallIntegerField(default=PLAN_TYPE_SELF_HOSTED)
+
+    # This is not synced with the remote server, but only filled for sponsorship requests.
+    org_type = models.PositiveSmallIntegerField(
+        default=Realm.ORG_TYPES["unspecified"]["id"],
+        choices=[(t["id"], t["name"]) for t in Realm.ORG_TYPES.values()],
+    )
+
+    # The last time 'RemoteRealmAuditlog' was updated for this server.
+    last_audit_log_update = models.DateTimeField(null=True)
 
     @override
     def __str__(self) -> str:
@@ -73,6 +86,8 @@ class RemotePushDeviceToken(AbstractPushDeviceToken):
     # The user id on the remote server for this device
     user_id = models.BigIntegerField(null=True)
     user_uuid = models.UUIDField(null=True)
+
+    remote_realm = models.ForeignKey("RemoteRealm", on_delete=models.SET_NULL, null=True)
 
     class Meta:
         unique_together = [
@@ -104,6 +119,15 @@ class RemoteRealm(models.Model):
     # Value obtained's from the remote server's realm.host.
     host = models.TextField()
 
+    name = models.TextField(default="")
+
+    authentication_methods = models.JSONField(default=dict)
+
+    org_type = models.PositiveSmallIntegerField(
+        default=Realm.ORG_TYPES["unspecified"]["id"],
+        choices=[(t["id"], t["name"]) for t in Realm.ORG_TYPES.values()],
+    )
+
     # The fields below are analogical to RemoteZulipServer fields.
 
     last_updated = models.DateTimeField("last updated", auto_now=True)
@@ -130,6 +154,67 @@ class RemoteRealm(models.Model):
         return f"{self.host} {str(self.uuid)[0:12]}"
 
 
+class AbstractRemoteRealmBillingUser(models.Model):
+    remote_realm = models.ForeignKey(RemoteRealm, on_delete=models.CASCADE)
+
+    # The .uuid of the UserProfile on the remote server
+    user_uuid = models.UUIDField()
+    email = models.EmailField()
+
+    class Meta:
+        abstract = True
+
+
+class RemoteRealmBillingUser(AbstractRemoteRealmBillingUser):
+    full_name = models.TextField(default="")
+
+    TOS_VERSION_BEFORE_FIRST_LOGIN = UserProfile.TOS_VERSION_BEFORE_FIRST_LOGIN
+    tos_version = models.TextField(default=TOS_VERSION_BEFORE_FIRST_LOGIN)
+
+    class Meta:
+        unique_together = [
+            ("remote_realm", "user_uuid"),
+        ]
+
+
+class PreregistrationRemoteRealmBillingUser(AbstractRemoteRealmBillingUser):
+    # status: whether an object has been confirmed.
+    #   if confirmed, set to confirmation.settings.STATUS_USED
+    status = models.IntegerField(default=0)
+
+    # These are for carrying certain information that's originally
+    # in an IdentityDict across the confirmation link flow. These
+    # values will be restored in the final, fully authenticated IdentityDict.
+    next_page = models.TextField(null=True)
+    uri_scheme = models.TextField()
+
+
+class AbstractRemoteServerBillingUser(models.Model):
+    remote_server = models.ForeignKey(RemoteZulipServer, on_delete=models.CASCADE)
+
+    email = models.EmailField()
+
+    class Meta:
+        abstract = True
+
+
+class RemoteServerBillingUser(AbstractRemoteServerBillingUser):
+    full_name = models.TextField(default="")
+
+    class Meta:
+        unique_together = [
+            ("remote_server", "email"),
+        ]
+
+
+class PreregistrationRemoteServerBillingUser(AbstractRemoteServerBillingUser):
+    # status: whether an object has been confirmed.
+    #   if confirmed, set to confirmation.settings.STATUS_USED
+    status = models.IntegerField(default=0)
+
+    next_page = models.TextField(null=True)
+
+
 class RemoteZulipServerAuditLog(AbstractRealmAuditLog):
     """Audit data associated with a remote Zulip server (not specific to a
     realm).  Used primarily for tracking registration and billing
@@ -154,10 +239,13 @@ class RemoteRealmAuditLog(AbstractRealmAuditLog):
 
     server = models.ForeignKey(RemoteZulipServer, on_delete=models.CASCADE)
 
-    # For pre-8.0 servers, we might only have the realm ID.
-    realm_id = models.IntegerField()
-    # With newer servers, we can link to the RemoteRealm object.
+    # With modern Zulip servers, we can link to the RemoteRealm object.
     remote_realm = models.ForeignKey(RemoteRealm, on_delete=models.CASCADE, null=True)
+    # For pre-8.0 servers, we might only have the realm ID and thus no
+    # RemoteRealm object yet. We will eventually be able to drop this
+    # column once all self-hosted servers have upgraded in favor of
+    # just using the foreign key everywhere.
+    realm_id = models.IntegerField(null=True, blank=True)
     # The remote_id field lets us deduplicate data from the remote server
     remote_id = models.IntegerField(null=True)
 
@@ -176,6 +264,16 @@ class RemoteRealmAuditLog(AbstractRealmAuditLog):
             models.Index(
                 fields=["server", "realm_id", "remote_id"],
                 name="zilencer_remoterealmauditlog_server_realm_remote",
+            ),
+            models.Index(
+                fields=["server", "realm_id"],
+                condition=Q(remote_realm__isnull=True),
+                name="zilencer_remoterealmauditlog_server_realm",
+            ),
+            models.Index(
+                fields=["server"],
+                condition=Q(remote_realm__isnull=True),
+                name="zilencer_remoterealmauditlog_server",
             ),
         ]
 
@@ -207,11 +305,14 @@ class RemoteInstallationCount(BaseRemoteCount):
                 condition=Q(subgroup__isnull=True),
                 name="unique_remote_installation_count_null_subgroup",
             ),
-        ]
-        indexes = [
-            models.Index(
+            UniqueConstraint(
                 fields=["server", "remote_id"],
-                name="zilencer_remoteinstallat_server_id_remote_id_f72e4c30_idx",
+                # As noted above, remote_id may be null, so we only
+                # enforce uniqueness if it isn't.  This is not
+                # technically necessary, since null != null, but it
+                # makes the property more explicit.
+                condition=Q(remote_id__isnull=False),
+                name="unique_remote_installation_count_server_id_remote_id",
             ),
         ]
 
@@ -243,6 +344,15 @@ class RemoteRealmCount(BaseRemoteCount):
                 condition=Q(subgroup__isnull=True),
                 name="unique_remote_realm_installation_count_null_subgroup",
             ),
+            UniqueConstraint(
+                fields=["server", "remote_id"],
+                # As with RemoteInstallationCount above, remote_id may
+                # be null; since null != null, this condition is not
+                # strictly necessary, but serves to make the property
+                # more explicit.
+                condition=Q(remote_id__isnull=False),
+                name="unique_remote_realm_installation_count_server_id_remote_id",
+            ),
         ]
         indexes = [
             models.Index(
@@ -250,8 +360,14 @@ class RemoteRealmCount(BaseRemoteCount):
                 name="zilencer_remoterealmcount_property_end_time_506a0b38_idx",
             ),
             models.Index(
-                fields=["server", "remote_id"],
-                name="zilencer_remoterealmcount_server_id_remote_id_de1573d8_idx",
+                fields=["server", "realm_id"],
+                condition=Q(remote_realm__isnull=True),
+                name="zilencer_remoterealmcount_server_realm",
+            ),
+            models.Index(
+                fields=["server"],
+                condition=Q(remote_realm__isnull=True),
+                name="zilencer_remoterealmcount_server",
             ),
         ]
 
@@ -281,3 +397,99 @@ class RateLimitedRemoteZulipServer(RateLimitedObject):
     @override
     def rules(self) -> List[Tuple[int, int]]:
         return rate_limiter_rules[self.domain]
+
+
+@dataclass
+class RemoteCustomerUserCount:
+    guest_user_count: int
+    non_guest_user_count: int
+
+
+def get_remote_server_guest_and_non_guest_count(
+    server_id: int, event_time: datetime = timezone_now()
+) -> RemoteCustomerUserCount:
+    # For each realm hosted on the server, find the latest audit log
+    # entry indicating the number of active users in that realm.
+    realm_last_audit_log_ids = (
+        RemoteRealmAuditLog.objects.filter(
+            server_id=server_id,
+            event_type__in=RemoteRealmAuditLog.SYNCED_BILLING_EVENTS,
+            event_time__lte=event_time,
+        )
+        # Important: extra_data is empty for some pre-2020 audit logs
+        # prior to the introduction of realm_user_count_by_role
+        # logging. Meanwhile, modern Zulip servers using
+        # bulk_create_users to create the users in the system bot
+        # realm also generate such audit logs. Such audit logs should
+        # never be the latest in a normal realm.
+        .exclude(extra_data={})
+        .values("realm_id")
+        .annotate(max_id=Max("id"))
+        .values_list("max_id", flat=True)
+    )
+
+    extra_data_list = RemoteRealmAuditLog.objects.filter(
+        id__in=list(realm_last_audit_log_ids)
+    ).values_list("extra_data", flat=True)
+
+    # Now we add up the user counts from the different realms.
+    guest_count = 0
+    non_guest_count = 0
+    for extra_data in extra_data_list:
+        humans_count_dict = extra_data[RemoteRealmAuditLog.ROLE_COUNT][
+            RemoteRealmAuditLog.ROLE_COUNT_HUMANS
+        ]
+        for role_type in UserProfile.ROLE_TYPES:
+            if role_type == UserProfile.ROLE_GUEST:
+                guest_count += humans_count_dict.get(str(role_type), 0)
+            else:
+                non_guest_count += humans_count_dict.get(str(role_type), 0)
+
+    return RemoteCustomerUserCount(
+        non_guest_user_count=non_guest_count, guest_user_count=guest_count
+    )
+
+
+def get_remote_realm_guest_and_non_guest_count(
+    remote_realm: RemoteRealm, event_time: datetime = timezone_now()
+) -> RemoteCustomerUserCount:
+    latest_audit_log = (
+        RemoteRealmAuditLog.objects.filter(
+            remote_realm=remote_realm,
+            event_type__in=RemoteRealmAuditLog.SYNCED_BILLING_EVENTS,
+            event_time__lte=event_time,
+        )
+        # Important: extra_data is empty for some pre-2020 audit logs
+        # prior to the introduction of realm_user_count_by_role
+        # logging. Meanwhile, modern Zulip servers using
+        # bulk_create_users to create the users in the system bot
+        # realm also generate such audit logs. Such audit logs should
+        # never be the latest in a normal realm.
+        .exclude(extra_data={}).last()
+    )
+
+    guest_count = 0
+    non_guest_count = 0
+    if latest_audit_log is not None:
+        humans_count_dict = latest_audit_log.extra_data[RemoteRealmAuditLog.ROLE_COUNT][
+            RemoteRealmAuditLog.ROLE_COUNT_HUMANS
+        ]
+        for role_type in UserProfile.ROLE_TYPES:
+            if role_type == UserProfile.ROLE_GUEST:
+                guest_count += humans_count_dict.get(str(role_type), 0)
+            else:
+                non_guest_count += humans_count_dict.get(str(role_type), 0)
+
+    return RemoteCustomerUserCount(
+        non_guest_user_count=non_guest_count, guest_user_count=guest_count
+    )
+
+
+def has_stale_audit_log(server: RemoteZulipServer) -> bool:
+    if server.last_audit_log_update is None:
+        return True
+
+    if timezone_now() - server.last_audit_log_update > timedelta(days=2):
+        return True
+
+    return False

@@ -50,6 +50,17 @@
                     {{/unless}}
                     {{/if}}
                 {{/if}}
+
+                {{#if (and is_development_environment show_remote_billing) }}
+                {{! This is only shown in development environment until the UI is ready. Added to help test the flow directly from gear menu.}}
+                {{! TODO: Add these above with proper conditions once the UI is ready. }}
+                <li class="org-upgrade navbar-dropdown-menu-inner-list-item">
+                    <a href="/self-hosted-billing/?next_page=sponsorship" target="_blank" rel="noopener noreferrer" class="navigate-link-on-enter navbar-dropdown-menu-link">{{t "Request sponsorship" }}</a>
+                </li>
+                <li class="org-upgrade navbar-dropdown-menu-inner-list-item">
+                    <a href="/self-hosted-billing/?next_page=upgrade" target="_blank" rel="noopener noreferrer" class="navigate-link-on-enter navbar-dropdown-menu-link">{{t "Upgrade" }}</a>
+                </li>
+                {{/if}}
             </ul>
         </li>
         <li class="navbar-dropdown-menu-outer-list-item">
@@ -59,15 +70,22 @@
                         <i class="navbar-dropdown-icon zulip-icon zulip-icon-hash" aria-hidden="true"></i> {{t 'Stream settings' }}
                     </a>
                 </li>
-                <li class="link-item navbar-dropdown-menu-inner-list-item hidden-for-spectators">
-                    <a href="#settings" class="navigate-link-on-enter navbar-dropdown-menu-link">
-                        <i class="navbar-dropdown-icon zulip-icon zulip-icon-tool" aria-hidden="true"></i> {{t 'Personal settings' }}
-                    </a>
-                </li>
                 <li class="link-item navbar-dropdown-menu-inner-list-item admin-menu-item hidden-for-spectators">
                     <a href="#organization" class="navigate-link-on-enter navbar-dropdown-menu-link">
                         <i class="navbar-dropdown-icon zulip-icon zulip-icon-building" aria-hidden="true"></i>
                         <span>{{t 'Organization settings' }}</span>
+                    </a>
+                </li>
+                {{#unless is_guest}}
+                <li class="link-item navbar-dropdown-menu-inner-list-item hidden-for-spectators">
+                    <a href="#groups" class="navigate-link-on-enter navbar-dropdown-menu-link">
+                        <i class="navbar-dropdown-icon zulip-icon zulip-icon-user-cog" aria-hidden="true"></i> {{t 'Group settings' }}
+                    </a>
+                </li>
+                {{/unless}}
+                <li class="link-item navbar-dropdown-menu-inner-list-item hidden-for-spectators">
+                    <a href="#settings" class="navigate-link-on-enter navbar-dropdown-menu-link">
+                        <i class="navbar-dropdown-icon zulip-icon zulip-icon-tool" aria-hidden="true"></i> {{t 'Personal settings' }}
                     </a>
                 </li>
                 {{#unless is_guest}}
@@ -119,14 +137,6 @@
                     </a>
                 </li>
                 {{/if}}
-                {{#if (and is_development_environment show_remote_billing) }}
-                {{! This is only shown in development environment until the UI is ready.}}
-                <li class="link-item navbar-dropdown-menu-inner-list-item">
-                    <a href="/self-hosted-billing/" target="_blank" rel="noopener noreferrer" class="navigate-link-on-enter navbar-dropdown-menu-link">
-                        <i class="navbar-dropdown-icon zulip-icon zulip-icon-credit-card" aria-hidden="true"></i> {{t 'Billing' }}
-                    </a>
-                </li>
-                {{/if}}
                 {{#if promote_sponsoring_zulip}}
                 <li class="link-item navbar-dropdown-menu-inner-list-item">
                     <a href="https://zulip.com/help/support-zulip-project" target="_blank" rel="noopener noreferrer" class="navigate-link-on-enter navbar-dropdown-menu-link">
@@ -134,7 +144,16 @@
                     </a>
                 </li>
                 {{/if}}
+                {{#if (and is_development_environment show_remote_billing) }}
+                {{! This is only shown in development environment until the UI is ready.}}
+                <li class="link-item navbar-dropdown-menu-inner-list-item">
+                    <a href="/self-hosted-billing/" target="_blank" rel="noopener noreferrer" class="navigate-link-on-enter navbar-dropdown-menu-link">
+                        <i class="navbar-dropdown-icon fa fa-rocket" aria-hidden="true"></i> {{t 'Plan management' }}
+                    </a>
+                </li>
+                {{/if}}
                 {{#if show_plans}}
+                {{!-- This will be hidden for self hosted realms since they will have corporate disabled. --}}
                 <li class="link-item navbar-dropdown-menu-inner-list-item">
                     <a href="/plans/" target="_blank" rel="noopener noreferrer" class="navigate-link-on-enter navbar-dropdown-menu-link">
                         <i class="navbar-dropdown-icon fa fa-rocket" aria-hidden="true"></i> {{t 'Plans and pricing' }}
@@ -143,6 +162,7 @@
                 {{/if}}
             </ul>
         </li>
+        {{#if (or can_invite_users_by_email can_create_multiuse_invite is_spectator show_webathena)}}
         <li class="navbar-dropdown-menu-outer-list-item">
             <ul class="navbar-dropdown-menu-inner-list">
                 {{#if (or can_invite_users_by_email can_create_multiuse_invite)}}
@@ -161,10 +181,11 @@
                 {{/if}}
                 <li class="link-item navbar-dropdown-menu-inner-list-item only-visible-for-spectators">
                     <a href="{{login_link}}" class="navigate-link-on-enter navbar-dropdown-menu-link">
-                        <i class="navbar-dropdown-icon zulip-icon zulip-icon-power" aria-hidden="true"></i> {{t 'Log in' }}
+                        <i class="navbar-dropdown-icon zulip-icon zulip-icon-log-in" aria-hidden="true"></i> {{t 'Log in' }}
                     </a>
                 </li>
             </ul>
         </li>
+        {{/if}}
     </ul>
 </div>

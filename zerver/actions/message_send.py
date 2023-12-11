@@ -1,7 +1,7 @@
-import datetime
 import logging
 from collections import defaultdict
 from dataclasses import dataclass
+from datetime import timedelta
 from email.headerregistry import Address
 from typing import (
     AbstractSet,
@@ -72,7 +72,7 @@ from zerver.lib.stream_subscription import (
     num_subscribers_for_stream_id,
 )
 from zerver.lib.stream_topic import StreamTopicTarget
-from zerver.lib.streams import access_stream_for_send_message, ensure_stream
+from zerver.lib.streams import access_stream_for_send_message, ensure_stream, subscribed_to_stream
 from zerver.lib.string_validation import check_stream_name
 from zerver.lib.timestamp import timestamp_to_datetime
 from zerver.lib.topic import participants_for_topic
@@ -83,7 +83,9 @@ from zerver.lib.users import (
     check_user_can_access_all_users,
     get_accessible_user_ids,
     get_subscribers_of_target_user_subscriptions,
+    get_user_ids_who_can_access_user,
     get_users_involved_in_dms_with_target_users,
+    user_access_restricted_in_realm,
 )
 from zerver.lib.validator import check_widget_content
 from zerver.lib.widget import do_widget_post_save_actions
@@ -595,6 +597,7 @@ def build_message_send_dict(
     mention_data = MentionData(
         mention_backend=mention_backend,
         content=message.content,
+        message_sender=message.sender,
     )
 
     if message.is_stream_message():
@@ -818,7 +821,7 @@ def filter_presence_idle_user_ids(user_ids: Set[int]) -> List[int]:
     if not user_ids:
         return []
 
-    recent = timezone_now() - datetime.timedelta(seconds=settings.OFFLINE_THRESHOLD_SECS)
+    recent = timezone_now() - timedelta(seconds=settings.OFFLINE_THRESHOLD_SECS)
     rows = UserPresence.objects.filter(
         user_profile_id__in=user_ids,
         last_active_time__gte=recent,
@@ -1103,6 +1106,7 @@ def do_send_messages(
             muted_sender_user_ids=list(send_request.muted_sender_user_ids),
             all_bot_user_ids=list(send_request.all_bot_user_ids),
             disable_external_notifications=send_request.disable_external_notifications,
+            realm_host=send_request.realm.host,
         )
 
         if send_request.message.is_stream_message():
@@ -1122,6 +1126,29 @@ def do_send_messages(
             if send_request.stream.first_message_id is None:
                 send_request.stream.first_message_id = send_request.message.id
                 send_request.stream.save(update_fields=["first_message_id"])
+
+            # Performance note: This check can theoretically do
+            # database queries in a loop if many messages are being
+            # sent via a single do_send_messages call.
+            #
+            # This is not a practical concern at present, because our
+            # only use case for bulk-sending messages via this API
+            # endpoint is for direct messages bulk-sent by system
+            # bots; and for system bots,
+            # "user_access_restricted_in_realm" will always return
+            # False without doing any database queries at all.
+            if user_access_restricted_in_realm(
+                send_request.message.sender
+            ) and not subscribed_to_stream(send_request.message.sender, send_request.stream.id):
+                user_ids_who_can_access_sender = get_user_ids_who_can_access_user(
+                    send_request.message.sender
+                )
+                user_ids_receiving_event = {user["id"] for user in users}
+                user_ids_without_access_to_sender = user_ids_receiving_event - set(
+                    user_ids_who_can_access_sender
+                )
+                event["user_ids_without_access_to_sender"] = user_ids_without_access_to_sender
+
         if send_request.local_id is not None:
             event["local_id"] = send_request.local_id
         if send_request.sender_queue_id is not None:
@@ -1174,9 +1201,9 @@ def already_sent_mirrored_message_id(message: Message) -> Optional[int]:
         # For huddle messages, we use a 10-second window because the
         # timestamps aren't guaranteed to actually match between two
         # copies of the same message.
-        time_window = datetime.timedelta(seconds=10)
+        time_window = timedelta(seconds=10)
     else:
-        time_window = datetime.timedelta(seconds=0)
+        time_window = timedelta(seconds=0)
 
     messages = Message.objects.filter(
         # Uses index: zerver_message_realm_recipient_subject
@@ -1370,7 +1397,7 @@ def send_rate_limited_pm_notification_to_bot_owner(
     # direct messages on a misconfigured integration, re-using the
     # UserProfile.last_reminder field, which is not used for bots.
     last_reminder = sender.last_reminder
-    waitperiod = datetime.timedelta(minutes=UserProfile.BOT_OWNER_STREAM_ALERT_WAITPERIOD)
+    waitperiod = timedelta(minutes=UserProfile.BOT_OWNER_STREAM_ALERT_WAITPERIOD)
     if last_reminder and timezone_now() - last_reminder <= waitperiod:
         return
 

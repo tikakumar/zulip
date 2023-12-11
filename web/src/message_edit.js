@@ -288,8 +288,9 @@ export function hide_message_edit_spinner($row) {
 }
 
 export function show_message_edit_spinner($row) {
-    const using_dark_theme = settings_data.using_dark_theme();
-    loading.show_button_spinner($row.find(".loader"), using_dark_theme);
+    // Always show the white spinner like we
+    // do for send button in compose box.
+    loading.show_button_spinner($row.find(".loader"), true);
     $row.find(".message_edit_save span").hide();
     $row.find(".message_edit_save").addClass("disable-btn");
     $row.find(".message_edit_cancel").addClass("disable-btn");
@@ -1040,7 +1041,13 @@ export function save_message_row_edit($row) {
                 delete message.local_edit_timestamp;
                 currently_echoing_messages.delete(message_id);
             }
-            hide_message_edit_spinner($row);
+            // Ordinarily, in a code path like this, we'd make
+            // a call to `hide_message_edit_spinner()`. But in
+            // this instance, we want to avoid a momentary flash
+            // of the Save button text before the edited message
+            // re-renders. Note that any subsequent editing will
+            // create a fresh Save button, without the spinner
+            // class attached.
         },
         error(xhr) {
             if (msg_list === message_lists.current) {
